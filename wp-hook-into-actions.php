@@ -146,6 +146,7 @@ function post_array_to_remote($url, $post_id, $post, $t)
         "slug" =>  $post->post_name,
         "post_id" => $post_id,
         'status' => $t,
+        'yoast' => get_post_meta($post_id, '_yoast_post_redirect_info', true)
     ];
     $body = wp_json_encode($body);
     $options = [
