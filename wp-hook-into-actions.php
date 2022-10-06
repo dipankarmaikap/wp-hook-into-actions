@@ -3,13 +3,14 @@
 /**
  * Plugin Name: WP Hook Into Action
  * Description: Trigger a hook when an action is triggered.
- * Version: 0.1.3
+ * Version: 0.1.4
  * Author:      Dipankar Maikap
  * Author URI:  https://dipankarmaikap.com/
  * License:     GPLv2 or later
  * License URI: http://www.gnu.org/licenses/gpl-2.0.html
  * 
  */
+
 function whia_settings_page()
 {
     add_submenu_page(
@@ -18,7 +19,7 @@ function whia_settings_page()
         'WP Hook Options', // title of the submenu
         'manage_options', // capability of the user to see this page
         'wp-hook-options', // slug of the settings page
-        'wp_hook_option_page_html' // callback function to be called when rendering the page
+        'whia_wp_hook_option_page_html' // callback function to be called when rendering the page
     );
     add_action('admin_init', 'whia_settings_init');
 }
@@ -56,7 +57,7 @@ function whia_settings_cb()
     </div>
 <?php
 }
-function wp_hook_option_page_html()
+function whia_wp_hook_option_page_html()
 {
     if (!current_user_can('manage_options')) {
         return;
@@ -71,14 +72,29 @@ function wp_hook_option_page_html()
     </div>
 <?php
 }
-add_action('wp_trash_post', 'send_post_delete_event');
-add_action('save_post_post', 'send_post_update_event');
-add_action('save_post_page', 'send_post_update_event');
+add_action('post_updated', 'whia_send_post_update_event', 20, 3);
 if (class_exists('ACF')) {
-    add_action('acf/save_post', 'send_post_update_event');
+    add_action('acf/save_post', 'whia_my_acf_save_post');
 }
-
-function wsraT_get_all_postTypes()
+function whia_my_acf_save_post($post_id)
+{
+    if (wp_is_post_autosave($post_id)) {
+        return;
+    }
+    $restEndpoint = esc_attr(get_option('whia_rest_endpoint', ''));
+    $isEmpty = empty($restEndpoint);
+    if ($isEmpty) {
+        return;
+    }
+    $post = [
+        'post_status' => get_post_status($post_id),
+        'yoast' => get_post_meta($post_id, '_yoast_post_redirect_info', true)
+    ];
+    if (!(defined('REST_REQUEST') && REST_REQUEST)) {
+        return whia_post_array_to_remote($restEndpoint, $post_id, $post);
+    }
+}
+function whia_get_all_postTypes()
 {
     $args = array(
         'exclude_from_search' => false
@@ -93,60 +109,43 @@ function wsraT_get_all_postTypes()
     return $post_types;
 }
 
-function send_post_delete_event($post_id)
+function whia_send_post_update_event($post_ID, $post_after, $post_before)
 {
-    if (wp_is_post_autosave($post_id)) {
+    if (wp_is_post_autosave($post_ID)) {
         return;
     }
+    $post_types = whia_get_all_postTypes();
+    if (!in_array($post_after->post_type, $post_types)) return;
     $restEndpoint = esc_attr(get_option('whia_rest_endpoint', ''));
     $isEmpty = empty($restEndpoint);
     if ($isEmpty) {
         return;
     }
     if (!(defined('REST_REQUEST') && REST_REQUEST)) {
-
-        $post = get_post($post_id);
-        $post_types = wsraT_get_all_postTypes();
-        if (in_array($post->post_type, $post_types)) {
-            $isPublished =   true;
-            if (!$isEmpty && $isPublished) {
-                return post_array_to_remote($restEndpoint, $post_id, $post, 'delete');
-            }
-        }
+        $post_type = $post_after->post_type;
+        $post_before_type = $post_before->post_type;
+        $post_status = $post_after->post_status;
+        $post_before_status = $post_before->post_status;
+        if ($post_status == 'draft' && $post_before_status == 'draft') return;
+        if ($post_status == 'draft' && $post_before_status == 'trash') return;
+        $post = [
+            'post_url' => str_replace(home_url(), '', get_permalink($post_after)),
+            'post_status' => $post_status,
+            'post_type' => $post_type,
+            'post_before_url' => str_replace(home_url(), '', get_permalink($post_before)),
+            'post_before_status' => $post_before_status,
+            'post_before_type' => $post_before_type,
+            'yoast' => get_post_meta($post_ID, '_yoast_post_redirect_info', true)
+        ];
+        return whia_post_array_to_remote($restEndpoint, $post_ID, $post);
     }
 }
-function send_post_update_event($post_id)
-{
-    if (wp_is_post_autosave($post_id)) {
-        return;
-    }
-    $restEndpoint = esc_attr(get_option('whia_rest_endpoint', ''));
-    $isEmpty = empty($restEndpoint);
-    if ($isEmpty) {
-        return;
-    }
-    if (!(defined('REST_REQUEST') && REST_REQUEST)) {
-
-        $post = get_post($post_id);
-        $post_types = wsraT_get_all_postTypes();
-        if (in_array($post->post_type, $post_types)) {
-            $isPublished =  $post->post_status == 'publish';
-            if (!$isEmpty && $isPublished) {
-                return post_array_to_remote($restEndpoint, $post_id, $post, 'publish');
-            }
-        }
-    }
-}
-
-function post_array_to_remote($url, $post_id, $post, $t)
+function whia_post_array_to_remote($url, $post_id, $post)
 {
     $body = [
         "url" => str_replace(home_url(), '', get_permalink($post_id)),
-        "type" => $post->post_type,
-        "slug" =>  $post->post_name,
         "post_id" => $post_id,
-        'status' => $t,
-        'yoast' => get_post_meta($post_id, '_yoast_post_redirect_info', true)
+        "post" =>  $post,
     ];
     $body = wp_json_encode($body);
     $options = [
@@ -155,6 +154,9 @@ function post_array_to_remote($url, $post_id, $post, $t)
             'Content-Type' => 'application/json',
         ],
     ];
+
+    //add 10 sec sleep to all the acf fields updated
+    sleep(10);
     $response = wp_remote_post($url, $options);
     return $response;
 }
